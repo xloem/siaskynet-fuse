@@ -11,4 +11,4 @@ add_executable (siaskynet-fuse source/main.cpp)
 
 target_link_libraries (siaskynet-fuse ${FUSEPP_LIBRARIES} ${SIASKYNETPP_LIBRARIES})
 target_include_directories (siaskynet-fuse PRIVATE ${FUSEPP_INCLUDE_DIRS} ${SIASKYNETPP_INCLUDE_DIRS})
-target_compile_options(siaskynet-fuse PRIVATE ${FUSEPP_CFLAGS})
+target_compile_options(siaskynet-fuse PRIVATE -Wno-multichar ${FUSEPP_CFLAGS})
