@@ -1,0 +1,6 @@
+[submodule "dependencies/fusepp"]
+	path = dependencies/fusepp
+	url = https://github.com/jachappell/fusepp.git
+[submodule "dependencies/siaskynetpp"]
+	path = dependencies/siaskynetpp
+	url = git@github.com:xloem/siaskynetpp
