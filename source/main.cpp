@@ -7,6 +7,8 @@
 #include <mutex>
 #include <unordered_map>
 
+#include <iostream> // DEBUG
+
 class SiaSkynetFS : public Fusepp::Fuse<SiaSkynetFS>
 {
 public:
@@ -16,16 +18,26 @@ public:
 	SiaSkynetFS(bool readonly = false, size_t rewriting_threshold = 4096, std::string initial_skylink = {});
 
 	int fuse_getattr(const char *path, struct stat *stbuf, struct fuse_file_info *fi);
+	int fuse_mkdir(const char *path, mode_t mode);
+	int fuse_mknod(const char *path, mode_t mode, dev_t dev);
 	int fuse_opendir(const char *path, struct fuse_file_info *fi);
+	int fuse_unlink(const char *path);
 	int fuse_open(const char *path, struct fuse_file_info *fi);
 	int fuse_releasedir(const char *path, struct fuse_file_info *fi);
 	int fuse_release(const char *path, struct fuse_file_info *fi);
 	int fuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_t offset, struct fuse_file_info *fi, enum fuse_readdir_flags flags);
 	int fuse_read(const char *path, char *buf, size_t size, off_t offset, struct fuse_file_info *fi);
 	int fuse_write(const char *path, const char *buf, size_t size, off_t offset, struct fuse_file_info * fi);
+	int fuse_chmod(const char *path, mode_t mode, struct fuse_file_info * fi);
 
 	static int getattr(const char *path, struct stat *stbuf, struct fuse_file_info *fi)
 	{ return this_()->fuse_getattr(path, stbuf, fi); }
+	static int mkdir(const char *path, mode_t mode)
+	{ return this_()->fuse_mkdir(path, mode); }
+	static int mknod(const char *path, mode_t mode, dev_t dev)
+	{ return this_()->fuse_mknod(path, mode, dev); }
+	static int unlink(const char *path)
+	{ return this_()->fuse_unlink(path); }
 	static int opendir(const char *path, struct fuse_file_info *fi)
 	{ return this_()->fuse_opendir(path, fi); }
 	static int open(const char *path, struct fuse_file_info *fi)
@@ -40,6 +52,8 @@ public:
 	{ return this_()->fuse_read(path, buf, size, offset, fi); }
 	static int write(const char *path, const char *buf, size_t size, off_t offset, struct fuse_file_info * fi)
 	{ return this_()->fuse_write(path, buf, size, offset, fi); }
+	static int chmod(const char *path, mode_t mode, struct fuse_file_info * fi)
+	{ return this_()->fuse_chmod(path, mode, fi); }
 
 	void sync();
 	std::string skylink();
@@ -52,30 +66,39 @@ private:
 
 	class sky_entry {
 	public:
-		sky_entry(std::unique_ptr<skynet_t> && skynet, std::shared_ptr<sky_entry> parent = {});
-		sky_entry(std::shared_ptr<sky_entry> parent, size_t subfile);
+		sky_entry(std::unique_ptr<skynet_t> && skynet, size_t subfile = 0, std::shared_ptr<sky_entry> parent = {});
+		sky_entry(std::shared_ptr<sky_entry> parent, size_t subfile, uint32_t mode);
 std::shared_ptr<sky_entry> const parent;
 
 		skynet_t const & skynet() { return *skynet_entry()->_skynet; }
-		size_t size() { skynet_entry(); return subfile().len; }
+		size_t size() { return skynet_entry()->subfile().len; }
 
 		//skynet_t * skynet() { return skynet_entry()->_skynet; }
 
 		//void get(sky_entry * & skynet_entry, subfile_t const * & subfile);
 
 		std::vector<std::string> subnames();
-		size_t create(std::string filename);
+		size_t find(std::string filename);
+		size_t create(std::string filename, uint32_t mode);
+		subfile_t & get(size_t subfile);
 
 		void point_to(sky_entry * skynet_entry);
 
 		void resize(size_t length);
+		void unlink();
 
 		void read(size_t offset, size_t length, void * data);
 		void write(size_t offset, size_t length, void const * data);
 
+		void chmod(uint32_t mode);
+		uint32_t mode() { return _mode; }
+
 	private:
 		sky_entry * skynet_entry();
 		subfile_t & subfile();
+
+		std::string contenttype(uint32_t mode);
+		void contenttype(std::string contenttype);
 
 		void read(sky_entry * skynet_entry, size_t offset, size_t length, void * data);
 		void write(sky_entry * skynet_entry, size_t offset, size_t length, void const * data);
@@ -83,8 +106,7 @@ std::shared_ptr<sky_entry> const parent;
 
 		std::shared_ptr<skynet_t> _skynet; // only set if depth == 0
 		size_t _subfile; // only set if depth > 0
-		// TODO: do we want a pointer to a linked subentry or anything?
-			// when iterating the members of a folder, we'll want to find that
+		uint32_t _mode;
 
 		std::mutex entry_lock;
 
@@ -105,7 +127,7 @@ std::shared_ptr<sky_entry> const parent;
 		};
 	};
 
-	std::shared_ptr<sky_entry> get(std::string const & path);
+	std::shared_ptr<sky_entry> & get(std::string path, bool create = false, uint32_t mode = 0);
 
 	std::mutex tree_lock;
 	std::unordered_map<std::string, std::shared_ptr<sky_entry>> tree;
@@ -116,26 +138,74 @@ std::shared_ptr<sky_entry> const parent;
 SiaSkynetFS::SiaSkynetFS(bool readonly, size_t rewriting_threshold, std::string initial_skylink)
 : readonly(readonly), rewriting_threshold(rewriting_threshold)
 {
-	if (!initial_skylink.size()) {
-		initial_skylink = skynet.upload("/", {});
+	std::cerr << "BOOT" << std::endl;
+	std::unique_ptr<skynet_t> root;
+	std::cerr << "ROOT" << std::endl;
+	if (initial_skylink.size()) {
+		root.reset(new skynet_t(skynet.download(initial_skylink)));
+	} else {
+		root.reset(new skynet_t{{}, sia::skynet::default_options});
 	}
 
-	std::unique_ptr<skynet_t> root(new skynet_t(skynet.download(initial_skylink)));
+	std::cerr << "SETUP" << std::endl;
 	tree.emplace(std::string("/"), std::make_shared<sky_entry>(std::move(root)));
+	std::cerr << "WHOO" << std::endl;
 }
 
 std::string SiaSkynetFS::skylink()
 {
-	return get("/")->skynet().skylink;
+	return get("/", false)->skynet().skylink;
 }
 
-SiaSkynetFS::sky_entry::sky_entry(std::unique_ptr<skynet_t> && skynet, std::shared_ptr<sky_entry> parent)
-: parent(parent), _skynet(skynet.release())
-{ }
+SiaSkynetFS::sky_entry::sky_entry(std::unique_ptr<skynet_t> && skynet, size_t subfile, std::shared_ptr<sky_entry> parent)
+: parent(parent), _skynet(skynet.release()), _subfile(subfile)
+{
+	std::string contenttype;
+	if (parent) {
+		contenttype = parent->get(subfile).contenttype;
+	} else {
+		contenttype = _skynet->metadata.contenttype;
+	}
+	this->contenttype(contenttype);
+
 
 SiaSkynetFS::sky_entry::sky_entry(std::shared_ptr<sky_entry> parent, size_t subfile)
 : parent(parent), _subfile(subfile)
-{ }
+{
+	this->contenttype(parent->get(subfile).contenttype);
+}
+
+void SiaSkynetFS::sky_entry::contenttype(std::string content_type)
+{
+	auto parts = cpr::util::split(content_type, ';');
+	for (auto & part : parts) {
+		if (part.compare(0, 5, "mode=") == 0) {
+			sscanf(part.c_str() + 5, "%o", &_mode);
+			break;
+		}
+	}
+	if (!parts.size()) {
+		_mode |= S_IFDIR;
+	} else if (parts[0] == "multipart/x.directory") {
+		_mode |= S_IFDIR;
+	}
+}
+
+std::string SiaSkynetFS::sky_entry::contenttype()
+{
+	std::string contenttype;
+	if (S_ISDIR(_mode)) {
+		contenttype = "multipart/x.directory";
+	} else {
+		contenttype = "application/octet-stream";
+	}
+
+	char mode_characters[64];
+	snprintf(mode_characters, sizeof(mode_characters), "%o", _mode);
+	contenttype = contenttype + ";mode=" + mode_characters;
+
+	return contenttype;
+}
 
 /*
 void SiaSkynetFS::sky_entry::get(sky_entry * & skynet_entry, subfile_t const * & subfile)
@@ -209,20 +279,57 @@ std::vector<std::string> SiaSkynetFS::sky_entry::subnames()
 	}
 	return result;
 }
-size_t SiaSkynetFS::sky_entry::create(std::string filename)
+size_t SiaSkynetFS::sky_entry::find(std::string filename)
 {
+	std::cerr << "SUB GET" << std::endl;
 	sky_entry * skynet_entry = this->skynet_entry();
+	std::cerr << "from: " << skynet_entry->_skynet->metadata.filename << std::endl;
+
+	sky_entry::work work(skynet_entry);
+	
+	std::cerr << "set up exclusive work" << std::endl;
+
+	subfile_t & subfile = skynet_entry->subfile();
+
+	std::cerr << "subfile: " << subfile.filename << std::endl;
+
+	size_t i = 0;
+	for (auto & subsubfile : subfile.subfiles) {
+		if (subsubfile.second.filename == filename) {
+			return i;
+		}
+		++i;
+	}
+
+	throw -ENOENT;
+}
+size_t SiaSkynetFS::sky_entry::create(std::string filename, uint32_t mode)
+{
+	std::cerr << "SUB CREATE" << std::endl;
+	sky_entry * skynet_entry = this->skynet_entry();
+	std::cerr << "from: " << skynet_entry->_skynet->metadata.filename << std::endl;
 
 	sky_entry::work work(skynet_entry);
 	
 	work.mutating();
+	std::cerr << "set up exclusive work" << std::endl;
 
 	subfile_t & subfile = skynet_entry->subfile();
+
+	std::cerr << "subfile: " << subfile.filename << std::endl;
 
 	subfile.subfiles.emplace_back(filename, subfile_t{{}, filename, 0, subfile.offset + subfile.len});
 
 	// race condition prevented by tree_lock
 	return subfile.subfiles.size() - 1;
+}
+
+SiaSkynetFS::subfile_t & SiaSkynetFS::sky_entry::get(size_t subfile)
+{
+	sky_entry * skynet_entry = this->skynet_entry();
+	sky_entry::work work(skynet_entry);
+	subfile_t & file = skynet_entry->subfile();
+	return file.subfiles[subfile].second;
 }
 
 void SiaSkynetFS::sky_entry::point_to(sky_entry * sub_skynet_entry)
@@ -254,20 +361,57 @@ void SiaSkynetFS::sky_entry::write(size_t offset, size_t length, void const * da
 {
 	sky_entry * skynet_entry = this->skynet_entry();
 
+	std::cerr << "WRITE WRAPPER" << std::endl;
+
 	write(skynet_entry, offset, length, data);
+}
+
+void SiaSkynetFS::sky_entry::resize(size_t length)
+{
+	sky_entry * skynet_entry = this->skynet_entry();
+
+	sky_entry::work work(skynet_entry);
+	work.mutating();
+
+	resize(skynet_entry, skynet_entry->subfile(), length);
+}
+
+void SiaSkynetFS::sky_entry::unlink()
+{
+	sky_entry * skynet_entry = this->skynet_entry();
+
+	sky_entry::work work(skynet_entry);
+	work.mutating();
+
+	auto & subfile = skynet_entry->subfile();
+
+	// TODO: remove children
+	resize(skynet_entry, subfile, 0);
+
+	// TODO: remove following siblings
+
+	// note: we do not have access to children from a parent.
+	// i think it would be meaningful to get rid of the unordered_tree structure
+	// and use sky_entries for everything.
 }
 
 void SiaSkynetFS::sky_entry::read(sky_entry * skynet_entry, size_t offset, size_t length, void * data)
 {
 	sky_entry::work work(skynet_entry);
 	auto subfile = skynet_entry->subfile();
+	std::cerr << "READ FROM " << subfile.filename << std::endl;
+	std::cerr << "READ IN " << skynet_entry->_skynet->metadata.filename << " AT " << subfile.offset + offset << " OF " << length << std::endl;
+	std::cerr << "DATA LENGTH = " << skynet_entry->_skynet->data.size() << std::endl;
 	auto reference = skynet_entry->_skynet->data.begin() + subfile.offset + offset;
+	std::cerr << "MOVING DATA" << std::endl;
 	std::copy(reference, reference + length, (uint8_t*)data);
+	std::cerr << "READ FINISH" << std::endl;
 }
 
 void shift(SiaSkynetFS::subfile_t & subfile, size_t offset, long long change)
 {
-	if (subfile.offset + subfile.len <= offset) { return; }
+	// have not fully reviewed this recursive function for correctness
+	if (subfile.offset + subfile.len < offset) { return; }
 	if (subfile.offset > offset) { subfile.offset += change; }
 	for (auto & entry : subfile.subfiles) {
 		shift(entry.second, offset, change);
@@ -281,7 +425,14 @@ void SiaSkynetFS::sky_entry::resize(sky_entry * skynet_entry, subfile_t & subfil
 {
 	if (length == subfile.len) { return; }
 
-	shift(skynet_entry->_skynet->metadata, subfile.offset, length - (long long)subfile.len);
+	std::cerr << "RESIZE " << subfile.len << " TO " << length << std::endl;
+
+	long long change = length - (long long)subfile.len;
+
+	shift(skynet_entry->_skynet->metadata, subfile.offset, change);
+	skynet_entry->_skynet->data.resize(skynet_entry->_skynet->data.size() + change);
+
+	std::cerr << "RESIZE DONE" << std::endl;
 }
 
 void SiaSkynetFS::sky_entry::write(sky_entry * skynet_entry, size_t offset, size_t length, void const * data)
@@ -295,20 +446,43 @@ void SiaSkynetFS::sky_entry::write(sky_entry * skynet_entry, size_t offset, size
 		resize(skynet_entry, subfile, offset + length);
 	}
 
+	std::cerr << "FIND DATA" << std::endl;
+
 	auto reference = skynet_entry->_skynet->data.begin() + subfile.offset + offset;
+	std::cerr << "MOVE DATA TO " << (subfile.offset + offset) << " IN BUFFER SIZED " << skynet_entry->_skynet->data.size() << std::endl;
 	std::copy((uint8_t*)data, (uint8_t*)data + length, reference);
+	std::cerr << "FINISH" << std::endl;
 }
 
-#include <iostream> // DEBUG
-std::shared_ptr<SiaSkynetFS::sky_entry> SiaSkynetFS::get(std::string const & path)
+void SiaSkynetFS::sky_entry::chmod(uint32_t mode)
 {
-	auto result = tree.find(path);
-	if (result != tree.end()) {
+	sky_entry * skynet_entry = this->skynet_entry();
+	sky_entry::work work(skynet_entry);
+
+	work.mutating();
+
+	subfile_t & subfile = skynet_entry->subfile();
+
+	_mode = mode;
+	subfile.contenttype = this->contenttype();
+}
+
+std::shared_ptr<SiaSkynetFS::sky_entry> & SiaSkynetFS::get(std::string path, bool create, uint32_t mode)
+{
+	if (!create) {
+		auto result = tree.find(path);
+		if (result == tree.end()) {
+			throw -ENOENT;
+		}
 		return result->second;
 	}
 
 	if (readonly) {
 		throw -EACCES;
+	}
+
+	if (tree.find(path) != tree.end()) {
+		throw -EEXIST;
 	}
 
 	std::cerr << "NEW PATH: " << path << std::endl;
@@ -317,25 +491,83 @@ std::shared_ptr<SiaSkynetFS::sky_entry> SiaSkynetFS::get(std::string const & pat
 	auto path_components = cpr::util::split(path, '/');
 	auto subpath = path_components.back();
 	auto superpath = path;
-	superpath.resize(path.size() - subpath.size());
+	
+	superpath.resize(superpath.size() - subpath.size());
+	if (superpath.size() > 1) { superpath.resize(superpath.size() - 1); }
 
-	auto parent = get(superpath);
+	std::cerr << "PARENT: " << superpath << std::endl;
+
+	auto parent = get(superpath, create, mode);
+	if (!parent) { throw -ENOENT; }
+
+	std::cerr << "GOT PARENT: " << superpath << std::endl;
 
 	std::lock_guard<std::mutex> lock(tree_lock);
 
-	auto subindex = parent->create(subpath);
-	return tree.emplace(path, std::make_shared<sky_entry>(parent, subindex)).first->second;
+	// when creating a file we know the mode in advance.
+	// let's pass that to create so as to unify how it is handled.
+
+	size_t subindex;
+	if (create) {
+		subindex = parent->create(subpath, mode);
+	} else {
+		subindex = parent->find(subpath);
+	}
+	auto emplacement = tree.emplace(path, std::make_shared<sky_entry>(parent, subindex));
+}
+
+int SiaSkynetFS::fuse_mkdir(const char *path, mode_t mode)
+{
+	try {
+		mode |= S_IFDIR;
+		auto & entry = get(path, true, mode);
+
+		return 0;
+	} catch (decltype(-EACCES) error) {
+		return error;
+	}
+
+}
+
+int SiaSkynetFS::fuse_mknod(const char *path, mode_t mode, dev_t dev)
+{
+	try {
+		auto & entry = get(path, true, mode);
+		entry->chmod(mode);
+
+		return 0;
+	} catch (decltype(-EACCES) error) {
+		return error;
+	}
+}
+
+int SiaSkynetFS::fuse_unlink(const char *path)
+{
+	try {
+		auto & entry = get(path);
+		entry->unlink();
+
+		return 0;
+	} catch (decltype(-EACCES) error) {
+		return error;
+	}
 }
 
 int SiaSkynetFS::fuse_open(const char *path, struct fuse_file_info *fi)
 {
+	std::cerr << "open " << path << std::endl;
+
 	if (readonly && (fi->flags & O_ACCMODE) != O_RDONLY) {
 		return -EACCES;
 	}
 
-	std::shared_ptr<SiaSkynetFS::sky_entry> * entry = new std::shared_ptr<SiaSkynetFS::sky_entry>(get(path));
-
 	try {
+		std::shared_ptr<SiaSkynetFS::sky_entry> * entry = new std::shared_ptr<SiaSkynetFS::sky_entry>(get(path, fi->flags & O_CREAT));
+
+		if ((fi->flags & O_ACCMODE) != O_RDONLY && (fi->flags & O_TRUNC)) {
+			(*entry)->resize(0);
+		}
+
 		fi->fh = reinterpret_cast<decltype(fi->fh)>(entry);
 		return 0;
 	} catch (decltype(-EACCES) error) {
@@ -345,13 +577,13 @@ int SiaSkynetFS::fuse_open(const char *path, struct fuse_file_info *fi)
 
 int SiaSkynetFS::fuse_opendir(const char * path, struct fuse_file_info *fi)
 {
+	std::cerr << "opendir " << path << std::endl;
 	if (readonly && (fi->flags & O_ACCMODE) != O_RDONLY) {
 		return -EACCES;
 	}
 
-	std::shared_ptr<SiaSkynetFS::sky_entry> * entry = new std::shared_ptr<SiaSkynetFS::sky_entry>(get(path));
-
 	try {
+		std::shared_ptr<SiaSkynetFS::sky_entry> * entry = new std::shared_ptr<SiaSkynetFS::sky_entry>(get(path, fi->flags & O_CREAT));
 		fi->fh = reinterpret_cast<decltype(fi->fh)>(entry);
 		return 0;
 	} catch (decltype(-EACCES) error) {
@@ -392,13 +624,21 @@ int SiaSkynetFS::fuse_getattr(const char *path, struct stat *stbuf, struct fuse_
 	memset(stbuf, 0, sizeof(struct stat));
 	// we don't really have a way of distinguishing between a dir and a file
 	
-	auto * entry = reinterpret_cast<std::shared_ptr<SiaSkynetFS::sky_entry>*>(fi->fh);
+	try {
+		auto & entry = fi ? *reinterpret_cast<std::shared_ptr<SiaSkynetFS::sky_entry>*>(fi->fh) : get(path, false);
 	
-	stbuf->st_mode = S_IFDIR | 0755;
-	stbuf->st_nlink = entry->use_count();
-	stbuf->st_size = (*entry)->size();
+		stbuf->st_nlink = entry.use_count();
+		std::cerr << "SET USE COUNT = " << stbuf->st_nlink << std::endl;
+		stbuf->st_mode = entry->mode();
+		std::cerr << "SET MODE = " << stbuf->st_mode << std::endl;
+		stbuf->st_size = entry->size();
+		std::cerr << "SET SIZE = " << stbuf->st_size << std::endl;
 
-	return 0;
+		return 0;
+	} catch (decltype(-EACCES) error) {
+		return error;
+	}
+
 }
 
 int SiaSkynetFS::fuse_read(const char *path, char *buf, size_t size, off_t offset, struct fuse_file_info * fi)
@@ -415,19 +655,21 @@ int SiaSkynetFS::fuse_write(const char *path, const char *buf, size_t size, off_
 	return size;
 }
 
+int SiaSkynetFS::fuse_chmod(const char *path, mode_t mode, struct fuse_file_info *fi)
+{
+	try {
+		auto & entry = fi ? *reinterpret_cast<std::shared_ptr<SiaSkynetFS::sky_entry>*>(fi->fh) : get(path, false);
+	
+		entry->chmod(mode);
+
+		return 0;
+	} catch (decltype(-EACCES) error) {
+		return error;
+	}
+}
+
 int main(int argc, char *argv[])
 {
 	SiaSkynetFS fs;
 	return fs.run(argc, argv);
 }
-
-
-// DELETE BELOW HERE
-
-// ====
-// we'll want a contenttype that contains a skyjlink
-// text/x.uri
-// ====
-
-
-// ran into a cognitive memory issue
