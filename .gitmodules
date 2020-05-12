@@ -4,4 +4,4 @@
 	branch = member-functions
 [submodule "dependencies/siaskynetpp"]
 	path = dependencies/siaskynetpp
-	url = git@github.com:xloem/siaskynetpp
+	url = https://github.com/xloem/siaskynetpp
