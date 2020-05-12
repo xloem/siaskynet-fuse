@@ -29,7 +29,6 @@ public:
 	int write(const char *path, const char *buf, size_t size, off_t offset, struct fuse_file_info * fi);
 	int chmod(const char *path, mode_t mode, struct fuse_file_info * fi);
 
-	void sync();
 	std::string skylink();
 
 private:
@@ -68,6 +67,11 @@ private:
 		void chmod(uint32_t mode);
 		uint32_t mode() { return _mode; }
 
+		void sync(sia::skynet & portal);
+
+		bool is_a_root() { return (bool)_skynet; }
+		std::string skylink() { return is_a_root() ? _skynet->skylink : ""; }
+
 	private:
 		sky_entry * skynet_entry();
 		subfile_t & subfile();
@@ -78,6 +82,9 @@ private:
 		void read(sky_entry * skynet_entry, size_t offset, size_t length, void * data);
 		void write(sky_entry * skynet_entry, size_t offset, size_t length, void const * data);
 		void resize(sky_entry * skynet_entry, subfile_t & subfile, size_t length);
+
+		void sync(sia::skynet & portaL, sky_entry * skynet_entry);
+		static void sync_check(sia::skynet & portal, sky_entry * skynet_entry, subfile_t & subfile, std::vector<sia::skynet::upload_data> & data, std::string path);
 
 		std::shared_ptr<skynet_t> _skynet; // only set if depth == 0
 		size_t _subfile; // only set if depth > 0
@@ -129,7 +136,9 @@ SiaSkynetFS::SiaSkynetFS(bool readonly, size_t rewriting_threshold, std::string 
 
 std::string SiaSkynetFS::skylink()
 {
-	return get("/", false)->skynet().skylink;
+	auto root = get("/");
+	root->sync(skynet);
+	return root->skynet().skylink;
 }
 
 SiaSkynetFS::sky_entry::sky_entry(std::unique_ptr<skynet_t> && skynet, size_t subfile, std::shared_ptr<sky_entry> parent)
@@ -310,7 +319,6 @@ SiaSkynetFS::subfile_t & SiaSkynetFS::sky_entry::get(size_t subfile)
 void SiaSkynetFS::sky_entry::point_to(sky_entry * sub_skynet_entry)
 {
 	// we've already been created as a link so our contenttype and length are correct
-
 	std::string & skylink = sub_skynet_entry->_skynet->skylink;
 	if (skylink.size() == 51) {
 		write(0, skylink.size(), skylink.data());
@@ -323,6 +331,47 @@ void SiaSkynetFS::sky_entry::point_to(sky_entry * sub_skynet_entry)
 			write(skynet_entry, 0, sizeof(link), &link);
 		}
 	}
+}
+
+void SiaSkynetFS::sky_entry::sync(sia::skynet & portal)
+{
+	sky_entry * skynet_entry = this->skynet_entry();
+	sync(portal, skynet_entry);
+}
+
+void SiaSkynetFS::sky_entry::sync_check(sia::skynet & portal, sky_entry * skynet_entry, subfile_t & subfile, std::vector<sia::skynet::upload_data> & data, std::string path)
+{
+	auto & skynet = *skynet_entry->_skynet;
+
+	if (subfile.contenttype.compare(0, 12, "text/url-list") == 0 && sizeof(mem_link) <= subfile.len) {
+		mem_link link;
+		std::copy(skynet.data.begin() + subfile.offset, skynet.data.begin() + subfile.offset + sizeof(link), (uint8_t*)&link);
+		if (link.prefix == mem_link::correct_prefix) {
+			link.link->sync(portal, link.link);
+			std::copy(link.link->_skynet->skylink.begin(), link.link->_skynet->skylink.end(), skynet.data.begin() + subfile.offset);
+		}
+	}
+
+	if (subfile.subfiles.size()) {
+		if (&skynet.metadata != &subfile) {
+			path += subfile.filename + "/";
+		}
+		for (auto & entry : subfile.subfiles) {
+			sync_check(portal, skynet_entry, entry.second, data, path);
+		}
+	} else {
+		data.emplace_back(path + subfile.filename, std::vector<uint8_t>(skynet.data.begin() + subfile.offset, skynet.data.begin() + subfile.offset + subfile.len), subfile.contenttype);
+	}
+}
+
+void SiaSkynetFS::sky_entry::sync(sia::skynet & portal, sky_entry * skynet_entry)
+{
+	skynet_t & skynet = *skynet_entry->_skynet;
+	std::vector<sia::skynet::upload_data> data;
+
+	sync_check(portal, skynet_entry, skynet.metadata, data, "");
+
+	skynet.skylink = portal.upload(skynet.metadata.filename, data);
 }
 
 void SiaSkynetFS::sky_entry::read(size_t offset, size_t length, void * data)
@@ -570,6 +619,10 @@ int SiaSkynetFS::release(const char *path, struct fuse_file_info *fi)
 {
 	auto * entry = reinterpret_cast<std::shared_ptr<SiaSkynetFS::sky_entry>*>(fi->fh);
 	delete entry;
+	
+	std::cerr << "skylink: " << skylink() << std::endl;
+	std::cerr << "that was skylink" << std::endl;
+
 	return 0;
 }
 
@@ -582,12 +635,12 @@ int SiaSkynetFS::releasedir(const char * path, struct fuse_file_info *fi)
 
 int SiaSkynetFS::readdir(const char * path, void * buf, fuse_fill_dir_t filler, off_t offset, struct fuse_file_info *fi, enum fuse_readdir_flags flags)
 {
-	auto * dir = reinterpret_cast<std::shared_ptr<SiaSkynetFS::sky_entry>*>(fi->fh);
+	auto & dir = *reinterpret_cast<std::shared_ptr<SiaSkynetFS::sky_entry>*>(fi->fh);
 
 	filler(buf, ".", NULL, 0, FUSE_FILL_DIR_PLUS);
 	filler(buf, "..", NULL, 0, FUSE_FILL_DIR_PLUS);
 	
-	for (auto & subfile : (*dir)->subnames()) {
+	for (auto & subfile : dir->subnames()) {
 		filler(buf, subfile.c_str(), NULL, 0, FUSE_FILL_DIR_PLUS);
 	}
 
