@@ -76,7 +76,7 @@ private:
 		sky_entry * skynet_entry();
 		subfile_t & subfile();
 
-		std::string contenttype();
+		std::string contenttype(uint32_t mode = 0);
 		void contenttype(std::string contenttype);
 
 		void read(sky_entry * skynet_entry, size_t offset, size_t length, void * data);
@@ -175,17 +175,18 @@ void SiaSkynetFS::sky_entry::contenttype(std::string content_type)
 	}
 }
 
-std::string SiaSkynetFS::sky_entry::contenttype()
+std::string SiaSkynetFS::sky_entry::contenttype(uint32_t mode)
 {
+	if (mode == 0) { mode = _mode; }
 	std::string contenttype;
-	if (S_ISDIR(_mode)) {
+	if (S_ISDIR(mode)) {
 		contenttype = "multipart/x.directory";
 	} else {
 		contenttype = "application/octet-stream";
 	}
 
 	char mode_characters[64];
-	snprintf(mode_characters, sizeof(mode_characters), "%o", _mode);
+	snprintf(mode_characters, sizeof(mode_characters), "%o", mode);
 	contenttype = contenttype + ";mode=" + mode_characters;
 
 	return contenttype;
@@ -302,7 +303,7 @@ size_t SiaSkynetFS::sky_entry::create(std::string filename, uint32_t mode)
 
 	std::cerr << "subfile: " << subfile.filename << std::endl;
 
-	subfile.subfiles.emplace_back(filename, subfile_t{{}, filename, 0, subfile.offset + subfile.len});
+	subfile.subfiles.emplace_back(filename, subfile_t{contenttype(mode), filename, 0, subfile.offset + subfile.len});
 
 	// race condition prevented by tree_lock
 	return subfile.subfiles.size() - 1;
@@ -544,6 +545,7 @@ int SiaSkynetFS::mkdir(const char *path, mode_t mode)
 {
 	try {
 		mode |= S_IFDIR;
+		std::cerr << "MAKEDIR " << path << " mode=" << mode << std::endl;
 		auto & entry = get(path, true, mode);
 
 		return 0;
