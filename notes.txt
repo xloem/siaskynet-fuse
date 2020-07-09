@@ -1,4 +1,26 @@
-CHANGE NEEDED: the skynet interface doesn't provide for upload multiply nested folders.  Instead things must be uploaded with full pathname, and they
-               are returned as a flat list.  This changes the `sky_entry` structure and behavior.
-CHANGE RECOMMENDED: `sky_entry` shouold become the intuitive way of interacting with things.  It should be possible to query it for its children.
-NOTE: plan is to use text/uri-list for links to deeper trees.  This provides for representing them with multiple possible uri's.  Could put a content-hash in the content-type.
+we'll likely want something that can be nested in a directory to represent a subdirectory.
+maybe give it characters that are illegal in a pathname.
+
+
+	one issue is when the contents of a folder change, it kinda looks like
+	the whole hierarchy might change, all the way up
+
+	it would be nice to only change one file when that happens.
+	
+	one thing we could do is merge other files in
+
+	anyway, skynet appears made of files that have names, lengths, and subfiles
+	so roughly directories
+
+	we could serialize these to storage, read/write them, and then merge them
+
+	or we could use something different for directory indexing
+
+	how about we actually do do it all the way up
+	and use links to other files, as files. this sounds helpful.
+
+	we'll want a local cache and a sense of what has been synchronized.
+
+	link name?  can this be a file with a special content?
+	can we set the content type on upload?
+	that would do it, but it doesn't happen on siaskynetpp
